@@ -1,0 +1,8 @@
+altair
+pandas
+streamlit
+openai
+folium
+streamlit_folium
+requests
+openpyxl

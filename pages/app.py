@@ -16,37 +16,17 @@ st.set_page_config(
 )
 
 # 初始化OpenAI客户端
-# ⚠️ 注意：请确保 DEEPSEEK_API_KEY 环境变量已设置，或在此处替换为您的密钥
 client = OpenAI(
     api_key=os.getenv("DEEPSEEK_API_KEY", "sk-72997944466a4af2bcd52a068895f8cf"), 
     base_url="https://api.deepseek.com"
 )
 
-# ----------------------------------------------------
-# 全局变量定义
-# ----------------------------------------------------
+# --- 全局变量定义 ---
 XLSX_FILENAME = "李白人生重要节点与代表作地理位置.xlsx"
 location_col = '地点（古称/今称）'
 summary_col = '诗作/事件摘要'
 
-
-# --- 1. RAG 补充函数：抓取CBDB李白人物资料 ---
-@st.cache_data(ttl=3600)
-def get_cbdb_data(name="李白"):
-    """从 CBDB API 获取人物 JSON"""
-    url = f"https://cbdb.fas.harvard.edu/cbdbapi/person.php?name={name}&o=json"
-    headers = {"User-Agent": "Mozilla/5.0 (Streamlit App)"}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except Exception:
-        return None
-
-# --- 2. 关键地点经纬度数据 (用于匹配) ---
-# 这里的坐标和匹配键用于将地名映射到 GIS 坐标
+# 地点经纬度数据（不变）
 LOCATION_COORDS = {
     "碎叶城": {"lat": 42.8447, "lon": 75.1648, "match_keys": ["碎叶城"]},
     "峨眉山": {"lat": 29.5807, "lon": 103.3592, "match_keys": ["峨眉山"]},
@@ -70,7 +50,6 @@ LOCATION_COORDS = {
     "白帝城": {"lat": 31.0450, "lon": 109.5780, "match_keys": ["白帝城", "奉节"]},
     "秋浦": {"lat": 30.6500, "lon": 117.4800, "match_keys": ["秋浦", "池州"]},
     "当涂": {"lat": 31.5453, "lon": 118.4870, "match_keys": ["当涂", "马鞍山"]},
-    # 泛指或主题类地点使用主要游历地坐标
     "蜀道": {"lat": 31.0000, "lon": 107.0000, "match_keys": ["蜀道"]},
     "月下独酌": {"lat": 34.2652, "lon": 108.9500, "match_keys": ["独酌", "月下"]},
     "静夜思": {"lat": 32.3934, "lon": 119.4290, "match_keys": ["静夜思"]},
@@ -81,165 +60,114 @@ LOCATION_COORDS = {
     "行路难": {"lat": 34.2652, "lon": 108.9500, "match_keys": ["行路难"]},
 }
 
-# --- 3. 数据加载与预处理 (核心修复区) ---
+# --- 数据加载与预处理（简化路径，适配多页面共享）---
 @st.cache_data
-def load_and_prepare_data(xlsx_file_name):
-    """加载 XLSX 文件，并合并经纬度数据。修复：增加 Hugging Face 路径兼容。"""
-    
-    # Hugging Face 兼容路径检查 (文件通常在 src/ 目录下)
+def load_and_prepare_data(xlsx_file_name, time_period=None):
+    """加载数据，支持按时段筛选（time_period: youth/middle/old）"""
     file_path = xlsx_file_name
     if not os.path.exists(file_path):
-        # 尝试检查 src/ 目录
-        src_path = os.path.join("src", xlsx_file_name)
-        if os.path.exists(src_path):
-            file_path = src_path
-        else:
-            st.error(f"❌ 错误：未能找到文件 '{xlsx_file_name}'。已检查根目录和 src/ 目录。请确保文件名和路径正确。")
-            return pd.DataFrame()
+        st.error(f"❌ 未找到数据文件 '{xlsx_file_name}'，请确保文件在仓库根目录。")
+        return pd.DataFrame()
 
-    df = pd.DataFrame()
-    
-    # 使用 read_excel() 读取 XLSX 文件
     try:
-        # 假设数据在第一个工作表（sheet_name=0）
-        df = pd.read_excel(file_path, sheet_name=0) 
-        st.success(f"✅ 文件 '{file_path}' 已成功加载。")
+        df = pd.read_excel(file_path, sheet_name=0)
+        df.columns = df.columns.str.strip()
     except Exception as e:
-        st.error(f"❌ 读取 XLSX 文件失败，请检查文件是否损坏或工作表名称是否正确。错误: {e}")
+        st.error(f"❌ 读取文件失败：{e}")
         return pd.DataFrame()
-    
-    # 清理列名（去除可能存在的首尾空格）
-    df.columns = df.columns.str.strip()
-    
-    # 检查关键列是否存在
-    if location_col not in df.columns or summary_col not in df.columns:
-        st.error(f"❌ 错误：XLSX 文件中未找到关键列 '{location_col}' 或 '{summary_col}'。当前列名为: {list(df.columns)}")
+
+    # 检查关键列
+    required_cols = [location_col, summary_col, '阶段（大致年份）', '节点类型', '核心情感/主题', '序号']
+    if not all(col in df.columns for col in required_cols):
+        st.error(f"❌ 数据文件缺少关键列，当前列名：{list(df.columns)}")
         return pd.DataFrame()
-        
-    # --- 经纬度匹配逻辑 ---
-    
+
+    # 按时段筛选数据（核心新增逻辑）
+    if time_period:
+        # 假设 Excel 中“阶段（大致年份）”列格式如：“701-725（青年）”“726-742（中年）”“743-762（晚年）”
+        # 可根据实际 Excel 格式调整筛选条件（比如按年份范围）
+        if time_period == "youth":
+            df = df[df['阶段（大致年份）'].str.contains("青年", na=False)]
+        elif time_period == "middle":
+            df = df[df['阶段（大致年份）'].str.contains("中年", na=False)]
+        elif time_period == "old":
+            df = df[df['阶段（大致年份）'].str.contains("晚年", na=False)]
+
+    # 匹配经纬度（不变）
     coords_list = []
-    df['coords_key'] = '' 
-    
+    df['coords_key'] = '未知'
     for index, row in df.iterrows():
-        # 这里需要处理 NaN 或 None 值，否则 .strip() 会报错
         location_str = str(row[location_col]).strip()
-        
         match = None
-        match_key_found = '未知'
-        
-        # 遍历 LOCATION_COORDS 查找最合适的匹配
+        match_key = '未知'
         for key, data in LOCATION_COORDS.items():
-            if location_str == key:
+            if location_str == key or any(k in location_str for k in data.get('match_keys', [])):
                 match = data
-                match_key_found = key
+                match_key = key
                 break
-            # 宽松匹配：检查匹配键是否在地点字符串中
-            if any(k in location_str for k in data.get('match_keys', [])):
-                match = data
-                match_key_found = key
-                break
-        
         if match:
             coords_list.append((match['lat'], match['lon']))
-            df.loc[index, 'coords_key'] = match_key_found
+            df.loc[index, 'coords_key'] = match_key
         else:
-            # 找不到坐标，使用默认中心点
-            coords_list.append((34.0478, 108.4357))
-            
+            coords_list.append((34.0478, 108.4357))  # 默认坐标
+
     df['Latitude'] = [c[0] for c in coords_list]
     df['Longitude'] = [c[1] for c in coords_list]
-    
     return df
 
-# 加载数据
-data_df = load_and_prepare_data(XLSX_FILENAME)
-
-# 初始化会话状态
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "highlight_location_key" not in st.session_state:
-    st.session_state.highlight_location_key = None  # 存储需要高亮的地点 key
-
-# --- 4. Chatbot 逻辑 (RAG) ---
+# --- RAG Chatbot 逻辑（不变）---
+@st.cache_data(ttl=3600)
+def get_cbdb_data(name="李白"):
+    url = f"https://cbdb.fas.harvard.edu/cbdbapi/person.php?name={name}&o=json"
+    headers = {"User-Agent": "Mozilla/5.0 (Streamlit App)"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        return response.json() if response.status_code == 200 else None
+    except Exception:
+        return None
 
 def run_chatbot(cbdb_data, prompt):
-    """运行 RAG 增强的 Chatbot"""
-    
-    # 构建包含 CBDB 数据的 Prompt
     cbdb_text = json.dumps(cbdb_data, ensure_ascii=False)[:5000] if cbdb_data else "无CBDB资料。"
-    
     system_prompt_rag = (
-        "你是一个李白生平研究的聊天机器人，能介绍李白的生平、作品和相关地点。"
-        "当用户询问地点相关问题时（如某首诗的创作地），请在回答中**给出详细答案，回答完后给出提及**地名（古称/今称），"
-        "并确保使用的地名与提供的 GIS 地图节点相匹配，例如：'安陆'，'桃花潭'，'黄鹤楼'，'长安'，'当涂'。"
-        "如果回答内容来自你引用的CBDB资料，请在结尾标注'（资料源自CBDB）'，"
-        "否则说'（资料来自网络）'。"
-        f"\n\n以下是CBDB人物资料（仅供参考和增强）：\n{cbdb_text}"
+        "你是李白生平研究专家，能介绍李白的生平、作品和相关地点。"
+        "当用户询问地点或时段相关问题时，需给出详细答案，并明确提及对应的古称/今称，"
+        "确保与GIS地图节点匹配（如安陆、桃花潭、长安等）。"
+        "资料源自CBDB请标注'（资料源自CBDB）'，否则标注'（资料来自网络）'。"
+        f"\n\nCBDB人物资料：\n{cbdb_text}"
     )
-    
     try:
-        # 构建消息列表：新的系统 Prompt 包含 RAG 数据
         messages = [{"role": "system", "content": system_prompt_rag}]
         messages.extend(st.session_state.chat_history[-5:])
-        
-        # 调用DeepSeek API
         response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=messages,
-            stream=False
+            model="deepseek-chat", messages=messages, stream=False
         )
         answer = response.choices[0].message.content.strip()
-        
-        # 尝试从 Chatbot 回答中提取地名，用于地图高亮
+        # 提取高亮地点
         highlight_key = None
-        
-        # 遍历所有可能的地点键，检查它们是否在 Chatbot 的回答中出现
-        for key in data_df['coords_key'].unique():
+        for key in st.session_state.data_df['coords_key'].unique():
             if key != '未知' and key in answer:
                 highlight_key = key
                 break
-        
         st.session_state.highlight_location_key = highlight_key
         return answer
-            
     except Exception as e:
         st.session_state.highlight_location_key = None
-        return f"Chatbot 发生错误: {str(e)}"
+        return f"Chatbot 错误：{str(e)}"
 
-# --- 5. GIS 地图生成函数 ---
-
+# --- 地图生成函数（不变）---
 def create_li_bai_map(df, highlight_key):
-    """根据 DataFrame 生成 Folium 地图，并高亮特定节点"""
-    
     if df.empty:
-        # 如果数据为空，返回一个默认地图
         return folium.Map(location=[34.0, 108.0], zoom_start=4)
-
     center_lat = df['Latitude'].mean()
     center_lon = df['Longitude'].mean()
-    
-    m = folium.Map(
-        location=[center_lat, center_lon], 
-        zoom_start=4.5, 
-        tiles="cartodbdarkmatter"
-    )
-
-    # 绘制轨迹线
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=4.5, tiles="cartodbdarkmatter")
+    # 绘制轨迹
     points = df[['Latitude', 'Longitude']].values.tolist()
     if len(points) > 1:
-        folium.PolyLine(
-            points, 
-            color="#00AEEF", 
-            weight=3, 
-            opacity=0.5,
-        ).add_to(m)
-
-    # 绘制节点和 Popup
+        folium.PolyLine(points, color="#00AEEF", weight=3, opacity=0.5).add_to(m)
+    # 绘制节点
     for index, row in df.iterrows():
         is_highlighted = (row['coords_key'] == highlight_key)
-        
-        # 弹出窗口内容
         popup_html = f"""
         **序号:** {row['序号']}<br>
         **阶段:** {row['阶段（大致年份）']}<br>
@@ -248,88 +176,57 @@ def create_li_bai_map(df, highlight_key):
         **核心情感:** {row['核心情感/主题']}<br>
         **节点类型:** <b>{row['节点类型']}</b>
         """
-        
-        # 确定标记点样式
-        if is_highlighted:
-            color = 'orange'
-            icon = 'fire'
-            tooltip = f"🔥 RAG高亮: {row['地点（古称/今称）']}"
-        elif '人生事件' in row['节点类型']:
-            color = 'blue'
-            icon = 'user'
-            tooltip = f"人生事件: {row['地点（古称/今称）']}"
-        else:
-            color = 'green'
-            icon = 'flag'
-            tooltip = f"作品创作: {row['地点（古称/今称）']}"
-            
+        color = 'orange' if is_highlighted else 'blue' if '人生事件' in row['节点类型'] else 'green'
+        icon = 'fire' if is_highlighted else 'user' if '人生事件' in row['节点类型'] else 'flag'
+        tooltip = f"🔥 高亮: {row['地点（古称/今称）']}" if is_highlighted else f"{row['节点类型']}: {row['地点（古称/今称）']}"
         folium.Marker(
             location=[row['Latitude'], row['Longitude']],
             popup=folium.Popup(popup_html, max_width=300),
             tooltip=tooltip,
             icon=folium.Icon(color=color, icon=icon, prefix='fa', icon_color='white')
         ).add_to(m)
-        
     return m
 
-# --- 6. 主应用布局 ---
+# --- 初始化会话状态 ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "highlight_location_key" not in st.session_state:
+    st.session_state.highlight_location_key = None
+if "data_df" not in st.session_state:
+    st.session_state.data_df = load_and_prepare_data(XLSX_FILENAME)  # 全量数据
 
+# --- 主页面布局 ---
+st.header("🐉 李白生平 GIS 地图与 Chatbot 交互系统")
 cbdb_data = get_cbdb_data("李白")
 
-st.header("🐉 李白生平 GIS 地图与 Chatbot 交互系统")
-
-if data_df.empty:
-    st.error("❌ 无法加载或处理李白生平节点数据，请检查文件路径和列名是否正确。")
-    # 如果加载失败，显示原始数据加载错误信息
-    st.dataframe(data_df)
+if st.session_state.data_df.empty:
+    st.error("❌ 无法加载李白生平数据，请检查文件路径和格式。")
 else:
-    # 使用分栏布局
     col1, col2 = st.columns([1, 1.5])
-
-    # --- 左侧：RAG Chatbot 区域 ---
+    # 左侧 Chatbot
     with col1:
         st.subheader("💬 CBDB-RAG 李白 Chatbot")
-        
-        # 提示 RAG 状态
-        if cbdb_data:
-            st.info("CBDB 资料已加载，增强问答功能。")
-        else:
-            st.warning("CBDB 资料加载失败，问答功能受限。")
-            
-        # 显示聊天历史
+        st.info("可询问李白生平、作品、地点意义，支持地图高亮") if cbdb_data else st.warning("CBDB 资料加载失败，问答功能受限")
+        # 聊天历史
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-        
-        # 处理用户输入
-        if prompt := st.chat_input("请输入你的问题 (例如：安陆对李白有什么意义？)..."):
-            
-            # 显示用户消息
+        # 用户输入
+        if prompt := st.chat_input("例如：李白青年时期去过哪些地方？安陆对李白有什么意义？"):
             with st.chat_message("user"):
                 st.markdown(prompt)
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-            
-            # 调用 Chatbot
             with st.chat_message("assistant"):
-                with st.spinner('AI 正在思考...'):
+                with st.spinner('AI 思考中...'):
                     answer = run_chatbot(cbdb_data, prompt)
                     st.markdown(answer)
                     st.session_state.chat_history.append({"role": "assistant", "content": answer})
-                
-                # 在 Chatbot 区域底部显示地图高亮提示
                 if st.session_state.highlight_location_key:
-                    st.success(f"地图已高亮显示：{st.session_state.highlight_location_key}")
-                
-            # 必须调用 rerun 以刷新地图
+                    st.success(f"地图已高亮：{st.session_state.highlight_location_key}")
             st.rerun()
-
-    # --- 右侧：GIS 地图区域 ---
+    # 右侧全时段地图
     with col2:
-        st.subheader("🗺️ 李白一生足迹 GIS 可视化")
-        st.info("地图轨迹按时间顺序绘制，高亮标记点由左侧 Chatbot 触发。")
-        
-        # 生成地图
-        current_map = create_li_bai_map(data_df, st.session_state.highlight_location_key)
-        
-        # 显示地图
+        st.subheader("🗺️ 李白一生完整足迹可视化")
+        st.info("左侧 Chatbot 提问可触发地图节点高亮，侧边栏可切换时段分页")
+        current_map = create_li_bai_map(st.session_state.data_df, st.session_state.highlight_location_key)
         st_folium(current_map, width=800, height=700)

@@ -1,8 +1,8 @@
 altair
-pandas
-streamlit
 openai
-folium
-streamlit_folium
 requests
 openpyxl
+streamlit>=1.30.0  # 确保支持st.rerun()
+streamlit-folium>=0.22.0
+pandas>=2.0.0
+folium>=0.16.0

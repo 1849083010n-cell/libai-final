@@ -24,13 +24,8 @@ st.set_page_config(
 )
 
 # --- 1. 初始化OpenAI客户端 ---
-api_key = os.getenv("DEEPSEEK_API_KEY")
-if not api_key:
-    st.warning("未检测到 DEEPSEEK_API_KEY 环境变量，将使用测试密钥（功能可能受限）")
-    api_key = "sk-72997944466a4af2bcd52a068895f8cf"  # 仅测试用
-
 client = OpenAI(
-    api_key=api_key,
+    api_key="sk-72997944466a4af2bcd52a068895f8cf",
     base_url="https://api.deepseek.com"
 )
 
